@@ -2,13 +2,18 @@
   'use strict';
 
   const LINKTREE_URL = 'https://linktr.ee/PurpleXPurple';
-  const PROXY_URL = 'https://api.allorigins.win/raw?url=';
+
+  // Proxy list – try in order
+  const PROXIES = [
+    (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  ];
 
   const bioEl = document.getElementById('bio-text');
   const contactEl = document.getElementById('contact-text');
   const container = document.getElementById('link-container');
 
-  // ── fallback data (creative recovery) ──
+  // ── fallback static data ──
   const FALLBACK_LINKS = [
     { label: 'GitHub', url: 'https://github.com/Purrple-hub' },
     { label: 'Twitter / X', url: 'https://x.com/PurpleXPurple' },
@@ -26,7 +31,7 @@
     }
   }
 
-  // ── render link cards ──
+  // ── render ──
   function render(links) {
     if (!links || links.length === 0) {
       container.innerHTML = '<p>No links found.</p>';
@@ -107,13 +112,47 @@
     return links.find((l) => l.url.includes('whatsapp') || l.url.includes('wa.me'));
   }
 
-  // ── main fetch with retry + fallback ──
-  async function fetchLinks(retriesLeft = 1) {
-    try {
-      const resp = await fetch(PROXY_URL + encodeURIComponent(LINKTREE_URL));
-      if (!resp.ok) throw new Error(`HTTP ${resp.status} – ${resp.statusText}`);
+  // ── fetch with proxy rotation ──
+  async function fetchWithProxy(proxyIndex = 0) {
+    if (proxyIndex >= PROXIES.length) {
+      throw new Error('All proxies failed');
+    }
 
-      const html = await resp.text();
+    const proxyUrl = PROXIES[proxyIndex](LINKTREE_URL);
+    const resp = await fetch(proxyUrl);
+
+    if (!resp.ok) {
+      throw new Error(`Proxy ${proxyIndex} returned ${resp.status}`);
+    }
+
+    const data = await resp.json();
+
+    // The 'get' endpoint returns { contents: "..." } – extract that
+    let html;
+    if (data.contents) {
+      html = data.contents;
+    } else if (data.response) {
+      // corsproxy.io returns { response: "..." }
+      html = data.response;
+    } else {
+      // Fallback – if it's plain text, treat it as HTML
+      html = typeof data === 'string' ? data : JSON.stringify(data);
+    }
+
+    return html;
+  }
+
+  // ── main ──
+  async function fetchLinks() {
+    try {
+      let html;
+      try {
+        html = await fetchWithProxy(0); // allorigins
+      } catch (err) {
+        console.warn('First proxy failed, trying backup...', err.message);
+        html = await fetchWithProxy(1); // corsproxy.io
+      }
+
       const bio = getBio(html);
       bioEl.textContent = bio;
 
@@ -127,25 +166,17 @@
         contactEl.textContent = 'No contact info found.';
       }
 
-      // If we previously showed a backup notice, remove it
+      // Remove any backup notice
       const oldNotice = document.getElementById('backup-notice');
       if (oldNotice) oldNotice.remove();
     } catch (err) {
-      console.warn(`Fetch attempt failed (${retriesLeft} retries left):`, err.message);
+      console.warn('All proxies failed – using static fallback:', err.message);
 
-      if (retriesLeft > 0) {
-        // Wait 1.5 seconds then retry – often fixes transient proxy issues
-        await new Promise((r) => setTimeout(r, 1500));
-        return fetchLinks(retriesLeft - 1);
-      }
-
-      // ── CREATIVE RECOVERY: use static fallback ──
-      console.info('Using fallback static data – proxy may be down.');
+      // ── static backup ──
       bioEl.textContent = FALLBACK_BIO;
       render(FALLBACK_LINKS);
       contactEl.innerHTML = `📧 <a href="mailto:${FALLBACK_CONTACT}" style="color:#a78bfa;">${FALLBACK_CONTACT}</a>`;
 
-      // Graceful UI notice (not a scary error)
       let notice = document.getElementById('backup-notice');
       if (!notice) {
         notice = document.createElement('p');
@@ -153,12 +184,11 @@
         notice.style.fontSize = '0.8rem';
         notice.style.opacity = '0.5';
         notice.style.marginTop = '1rem';
-        notice.textContent = '⚡ Loaded from static backup – refresh to try live data.';
+        notice.textContent = '⚡ Using static backup – refresh to retry live data.';
         document.getElementById('links').appendChild(notice);
       }
     }
   }
 
-  // Start the process
   fetchLinks();
 })();
